@@ -549,12 +549,34 @@ else {
 
 # -- Step 3: App authentication ------------------------------------------------
 Write-Header 'Step 3 of 4 - Authenticating as App'
-Write-Step 'Acquiring token using client credentials...'
 
-$appToken = Get-ClientCredentialToken `
-    -TenantId     $TenantId `
-    -ClientId     $appCredentials.AppId `
-    -ClientSecret $appCredentials.ClientSecret
+# Newly created app registrations take a few seconds to replicate across
+# Azure AD before client credentials auth will succeed.
+if (-not $SkipAppCreation) {
+    Write-Step 'Waiting 20 seconds for app registration to propagate in Azure AD...'
+    Start-Sleep -Seconds 20
+}
+
+$maxRetries = 5
+$retryDelay = 10
+$appToken   = $null
+
+for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+    try {
+        Write-Step "Acquiring token using client credentials (attempt $attempt of $maxRetries)..."
+        $appToken = Get-ClientCredentialToken `
+            -TenantId     $TenantId `
+            -ClientId     $appCredentials.AppId `
+            -ClientSecret $appCredentials.ClientSecret
+        break
+    }
+    catch {
+        if ($attempt -eq $maxRetries) { throw }
+        Write-Warn "Token request failed: $_"
+        Write-Step "Retrying in $retryDelay seconds..."
+        Start-Sleep -Seconds $retryDelay
+    }
+}
 
 Write-Ok 'App token acquired.'
 
