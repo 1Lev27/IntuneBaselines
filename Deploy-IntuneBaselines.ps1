@@ -337,19 +337,47 @@ function New-AppRegistration {
 function Get-ODataType {
     param($PolicyObj)
 
-    if ($PolicyObj.'@odata.type')     { return $PolicyObj.'@odata.type' }
-    if ($PolicyObj.templateReference) { return '#microsoft.graph.deviceManagementConfigurationPolicy' }
-    if ($PolicyObj.settingsDelta)     { return '#microsoft.graph.groupPolicyConfiguration' }
+    # Use PSObject.Properties for StrictMode-safe access (no throw on missing key)
+    $props = $PolicyObj.PSObject.Properties
+
+    $typeProp = $props['@odata.type']
+    if ($typeProp -and $typeProp.Value) { return $typeProp.Value }
+
+    # Settings Catalog: has templateReference or platforms+technologies+settings
+    if ($props['templateReference'] -and $props['templateReference'].Value) {
+        return '#microsoft.graph.deviceManagementConfigurationPolicy'
+    }
+    if ($props['platforms'] -and $props['technologies'] -and $props['settings']) {
+        return '#microsoft.graph.deviceManagementConfigurationPolicy'
+    }
+
+    # ADMX / Group Policy configuration
+    if ($props['settingsDelta']) {
+        return '#microsoft.graph.groupPolicyConfiguration'
+    }
+
     return $null
 }
 
 function Resolve-GraphEndpoint {
     param([string]$ODataType)
 
+    # Exact-prefix matching (table entries ordered most-specific first)
     foreach ($prefix in $PROFILE_ROUTE_KEYS) {
         if ($ODataType -like "$prefix*") {
             return "$GRAPH_BASE/$($PROFILE_ROUTE_VALUES[$prefix])"
         }
+    }
+
+    # Suffix-based fallback: compliance policy subtypes all end in 'CompliancePolicy'
+    # e.g. windows10CompliancePolicy, androidCompliancePolicy, macOSCompliancePolicy
+    if ($ODataType -like '*CompliancePolicy') {
+        return "$GRAPH_BASE/beta/deviceManagement/deviceCompliancePolicies"
+    }
+
+    # Autopilot profile subtypes (azureAD*, activeDirectory*)
+    if ($ODataType -like '*AutopilotDeploymentProfile') {
+        return "$GRAPH_BASE/beta/deviceManagement/windowsAutopilotDeploymentProfiles"
     }
 
     return "$GRAPH_BASE/beta/deviceManagement/deviceConfigurations"
@@ -413,9 +441,13 @@ function Remove-ODataMetadata {
     param($Obj)
 
     $readOnly = @(
+        # Standard read-only Graph fields
         'id', 'createdDateTime', 'lastModifiedDateTime', 'version',
-        'supportsScopeTags', 'roleScopeTagIds', '@odata.context',
-        '@odata.etag', 'settingCount'
+        'supportsScopeTags', 'roleScopeTagIds', '@odata.context', '@odata.etag',
+        # configurationPolicy extras
+        'settingCount', 'isAssigned',
+        # Navigation property links — Graph rejects these on create/update
+        'settingDefinitions', 'assignments', 'scheduledActionsForRule'
     )
 
     # Round-trip through JSON to get a plain PSObject we can mutate
