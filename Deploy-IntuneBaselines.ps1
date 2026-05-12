@@ -334,6 +334,43 @@ function New-AppRegistration {
     }
 }
 
+function Find-ExistingApp {
+    <#
+    .SYNOPSIS Looks up an app registration by display name. Returns the app
+               object if found, otherwise returns $null.
+    #>
+    param([string]$DisplayName, [string]$AdminToken)
+
+    # Build filter URI without inline & so PS 5.1 parser is happy
+    $filterUri = 'https://graph.microsoft.com/v1.0/applications?$filter=displayName eq ''{0}''&$select=id,appId,displayName' -f $DisplayName
+    $result    = Invoke-GraphRequest -Method Get -Uri $filterUri -Token $AdminToken
+
+    if ($result.value -and $result.value.Count -gt 0) {
+        return $result.value[0]
+    }
+    return $null
+}
+
+function Add-AppSecret {
+    <#
+    .SYNOPSIS Adds a new 1-year client secret to an existing app registration
+               and returns the secret text.
+    #>
+    param([string]$AppObjectId, [string]$AdminToken)
+
+    $secretResult = Invoke-GraphRequest -Method Post `
+        -Uri "https://graph.microsoft.com/v1.0/applications/$AppObjectId/addPassword" `
+        -Token $AdminToken `
+        -Body @{
+            passwordCredential = @{
+                displayName = 'IntuneBaselinesDeployer'
+                endDateTime = (Get-Date).AddYears(1).ToString('o')
+            }
+        }
+
+    return $secretResult.secretText
+}
+
 function Get-ODataType {
     param($PolicyObj)
 
@@ -541,6 +578,7 @@ if ($SkipAppCreation) {
         $ClientSecret = Read-Host 'Enter Client Secret'
     }
     $appCredentials = @{ AppId = $ClientId; ClientSecret = $ClientSecret }
+    $appWasReused   = $true
 }
 else {
     # -- Step 1: Admin bootstrap auth ------------------------------------------
@@ -560,13 +598,27 @@ else {
 
     Write-Ok 'Admin authenticated.'
 
-    # -- Step 2: Create App Registration ---------------------------------------
-    Write-Header 'Step 2 of 4 - Creating App Registration'
+    # -- Step 2: Create or reuse App Registration ------------------------------
+    Write-Header 'Step 2 of 4 - App Registration'
+    Write-Step "Checking whether '$AppDisplayName' already exists in the tenant..."
 
-    $appCredentials = New-AppRegistration `
-        -DisplayName $AppDisplayName `
-        -AdminToken  $adminToken `
-        -TenantId    $TenantId
+    $existingApp = Find-ExistingApp -DisplayName $AppDisplayName -AdminToken $adminToken
+
+    if ($existingApp) {
+        Write-Ok "Found existing app registration (appId: $($existingApp.appId)). Skipping creation."
+        Write-Step 'Adding a new client secret to the existing app...'
+        $newSecret      = Add-AppSecret -AppObjectId $existingApp.id -AdminToken $adminToken
+        $appCredentials = @{ AppId = $existingApp.appId; ClientSecret = $newSecret }
+        $appWasReused   = $true
+    }
+    else {
+        Write-Step "Not found. Creating new app registration '$AppDisplayName'..."
+        $appCredentials = New-AppRegistration `
+            -DisplayName $AppDisplayName `
+            -AdminToken  $adminToken `
+            -TenantId    $TenantId
+        $appWasReused = $false
+    }
 
     Write-Host ''
     Write-Host '  +----------------------------------------------------------+' -ForegroundColor Green
@@ -584,8 +636,8 @@ Write-Header 'Step 3 of 4 - Authenticating as App'
 
 # Newly created app registrations take a few seconds to replicate across
 # Azure AD before client credentials auth will succeed.
-if (-not $SkipAppCreation) {
-    Write-Step 'Waiting 20 seconds for app registration to propagate in Azure AD...'
+if (-not $SkipAppCreation -and -not $appWasReused) {
+    Write-Step 'Waiting 20 seconds for new app registration to propagate in Azure AD...'
     Start-Sleep -Seconds 20
 }
 
