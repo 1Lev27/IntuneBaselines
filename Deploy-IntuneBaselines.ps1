@@ -235,8 +235,10 @@ function New-AppRegistration {
 
     # ── Resolve Graph service principal and required app role IDs ──────────────
     Write-Step "Resolving Microsoft Graph service principal in tenant…"
+    # Build URI in a variable — PS 5.1 parser rejects bare & inside inline strings
+    $spUri = '{0}/v1.0/servicePrincipals?$filter=appId eq ''{1}''&$select=id,appRoles' -f $GRAPH_BASE, $GRAPH_APP_ID
     $graphSp = Invoke-GraphRequest -Method Get `
-        -Uri "$GRAPH_BASE/v1.0/servicePrincipals?`$filter=appId eq '$GRAPH_APP_ID'&`$select=id,appRoles" `
+        -Uri $spUri `
         -Token $AdminToken
 
     $graphSpId = $graphSp.value[0].id
@@ -468,7 +470,11 @@ function Invoke-ProfileUpload {
                 -Body $cleaned `
                 -Token $Token
 
-            Write-Ok "Created: $($response.displayName ?? $response.name ?? $response.id)"
+            # ?? is PS 7+ only; use nested if for PS 5.1 compatibility
+            $createdName = if ($response.displayName) { $response.displayName } `
+                           elseif ($response.name)    { $response.name }        `
+                           else                       { $response.id }
+            Write-Ok "Created: $createdName"
             $results.Success++
         }
         catch {
